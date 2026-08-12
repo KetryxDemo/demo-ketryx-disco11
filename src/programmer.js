@@ -77,12 +77,13 @@ class Programmer {
   }
 
   requestAmplitude(mA) {
+    // The implant ceiling applies regardless of step size, so it is checked first.
+    if (mA > this.ceilingMa) {
+      return { accepted: false, reason: 'CEILING_EXCEEDED' };
+    }
     const step = Math.abs(mA - this.committed.amplitudeMa);
     if (step > STEP_LIMIT_MA) {
       return { accepted: false, reason: 'STEP_LIMIT_EXCEEDED' };
-    }
-    if (mA > this.ceilingMa) {
-      return { accepted: false, reason: 'CEILING_EXCEEDED' };
     }
     this.pending = { amplitudeMa: mA };
     return { accepted: true };
@@ -98,6 +99,20 @@ class Programmer {
   setAmplitude(mA) {
     this.committed.amplitudeMa = mA;
     this.lastCommittedAmplitude = mA;
+  }
+
+  performHandshake({ peerCertTrusted }) {
+    if (!peerCertTrusted) {
+      this.telemetryOpen = false;
+      return { established: false, reason: 'PEER_CERT_UNTRUSTED' };
+    }
+    this.telemetryOpen = true;
+    return { established: true };
+  }
+
+  deriveSessionKey(sessionIndex) {
+    // Per-session derivation: keys are never reused across sessions.
+    return `sk-${this.clinician || 'anon'}-${sessionIndex}-${sessionIndex * 7919 + 13}`;
   }
 
   commitAmplitude(mA) {

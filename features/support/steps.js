@@ -3,6 +3,7 @@
 const assert = require('assert');
 const { Given, When, Then } = require('@cucumber/cucumber');
 const { Programmer } = require('../../src/programmer');
+const { buildBillOfMaterials } = require('../../src/bom');
 
 Given('a clinician who has not authenticated', function () {
   this.programmer = new Programmer();
@@ -43,6 +44,10 @@ Given('an implant whose serial has not been confirmed against the patient record
 });
 
 When('they attempt to open a programming session', function () {
+  this.result = this.programmer.openSession();
+});
+
+When('the clinician attempts to open a programming session', function () {
   this.result = this.programmer.openSession();
 });
 
@@ -130,4 +135,62 @@ Then('the session is blocked', function () {
 
 Then('the clinician is prompted to confirm the patient-to-implant match', function () {
   assert.strictEqual(this.result.reason, 'PATIENT_MATCH_UNCONFIRMED');
+});
+
+// --- Telemetry session cryptography -------------------------------------
+
+Given('an implant presenting a certificate that does not chain to the device CA', function () {
+  this.programmer = new Programmer();
+  this.handshake = { peerCertTrusted: false };
+});
+
+Given('two consecutive programming sessions with the same implant', function () {
+  this.programmer = Programmer.inOpenSession();
+  this.sessions = 2;
+});
+
+When('the programmer performs the telemetry handshake', function () {
+  this.result = this.programmer.performHandshake(this.handshake);
+});
+
+When('session keys are derived for each', function () {
+  this.keys = [];
+  for (let i = 0; i < this.sessions; i += 1) {
+    this.keys.push(this.programmer.deriveSessionKey(i));
+  }
+});
+
+Then('the handshake is abandoned', function () {
+  assert.strictEqual(this.result.established, false);
+});
+
+Then('no telemetry session is opened', function () {
+  assert.strictEqual(this.programmer.telemetryOpen, false);
+});
+
+Then('the two session keys differ', function () {
+  assert.notStrictEqual(this.keys[0], this.keys[1]);
+});
+
+// --- Third-party component inventory ------------------------------------
+
+Given('a build of the programmer for a released version', function () {
+  this.build = { version: '1.0.0' };
+});
+
+When('the build completes', function () {
+  this.bom = buildBillOfMaterials(this.build.version);
+});
+
+Then('a CycloneDX bill of materials is published for that version', function () {
+  assert.strictEqual(this.bom.bomFormat, 'CycloneDX');
+  assert.strictEqual(this.bom.metadata.component.version, this.build.version);
+});
+
+Then('every third-party component is listed with a package URL and version', function () {
+  assert.ok(this.bom.components.length > 0);
+  for (const c of this.bom.components) {
+    assert.ok(c.purl, 'component missing purl');
+    assert.ok(c.version, 'component missing version');
+  }
 });
