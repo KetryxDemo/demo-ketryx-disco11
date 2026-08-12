@@ -30,6 +30,24 @@ jobs:
         run: npm test
         continue-on-error: true
 
+      - name: Strip trace tags from report
+        # @tests tags belong in the .feature SOURCE - that is what builds the
+        # Test Case trace at repo-scan time. Leaving them in the RUNTIME report
+        # makes the Build API also create a bare AT linked straight to the
+        # requirement, so the matrix shows every scenario twice.
+        run: |
+          node -e "
+            const fs = require('fs');
+            const p = 'reports/cucumber.json';
+            const r = JSON.parse(fs.readFileSync(p, 'utf8'));
+            for (const feat of r) {
+              for (const el of feat.elements || []) {
+                el.tags = (el.tags || []).filter(t => !t.name.startsWith('@tests:'));
+              }
+            }
+            fs.writeFileSync(p, JSON.stringify(r));
+          "
+
       - name: Report to Ketryx
         uses: Ketryx/ketryx-github-action@v1
         with:
