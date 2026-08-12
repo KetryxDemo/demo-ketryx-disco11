@@ -44,9 +44,11 @@ jobs:
       - name: Report to Ketryx
         uses: Ketryx/ketryx-github-action@v1
         with:
+          # Demo instance, not app.ketryx.com (which is the action's default).
+          ketryx-url: https://demo.ketryx.com
           project: ${{ vars.KETRYX_PROJECT }}
           api-key: ${{ secrets.KETRYX_API_KEY }}
           version: ${{ github.event.inputs.version || '1.0.0' }}
           build-name: cp-verification
           test-cucumber-path: reports/cucumber.json
-          sbom-path: reports/sbom.cdx.json
+          cyclonedx-json-path: reports/sbom.cdx.json
