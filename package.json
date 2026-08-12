@@ -1,0 +1,12 @@
+{
+  "name": "neurocue-clinician-programmer",
+  "version": "1.0.0",
+  "private": true,
+  "description": "NeuroCue SCS Clinician Programmer",
+  "scripts": {
+    "test": "cucumber-js --format json:reports/cucumber.json"
+  },
+  "devDependencies": {
+    "@cucumber/cucumber": "^10.3.1"
+  }
+}
