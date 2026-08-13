@@ -213,11 +213,19 @@ if (changedSpecs.length === 0) {
 }
 
 const PAGE = 1000;
-async function fetchRecords() {
+
+// `query` is a required parameter on this endpoint even though it is the KQL
+// filter. An empty KQL query matches every record, which is what we want - the
+// gate filters by type client-side rather than betting on type shorthands.
+async function fetchRecords(kql = '') {
   const out = [];
   let startAt = 0;
   for (;;) {
-    const url = `${KETRYX_URL}/api/v1/projects/${PROJECT}/records?versionId=${VERSION_ID}&startAt=${startAt}&maxResults=${PAGE}`;
+    const url =
+      `${KETRYX_URL}/api/v1/projects/${PROJECT}/records` +
+      `?versionId=${encodeURIComponent(VERSION_ID)}` +
+      `&query=${encodeURIComponent(kql)}` +
+      `&startAt=${startAt}&maxResults=${PAGE}`;
     const res = await fetch(url, { headers: { Authorization: `Bearer ${API_KEY}` } });
     if (!res.ok) throw new Error(`records query failed: HTTP ${res.status} ${await res.text()}`);
     const body = await res.json();
@@ -246,6 +254,9 @@ for (let attempt = 1; attempt <= 20; attempt++) {
 }
 
 console.log(`Ketryx returned ${records.length} record(s) for version ${VERSION_ID}.`);
+const byType = {};
+for (const r of records) byType[r.type || 'unknown'] = (byType[r.type || 'unknown'] || 0) + 1;
+console.log(`Record types: ${Object.entries(byType).map(([k, v]) => `${k}=${v}`).join(', ')}`);
 
 for (const w of wanted) {
   const rec = records.find((r) => r.title === w.title);
