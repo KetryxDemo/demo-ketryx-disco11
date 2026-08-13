@@ -1,0 +1,193 @@
+name: Ketryx PR checks
+
+# Pull-request gates, modelled on KetryxDemo/ketryx-vitals-poc:
+#
+#   1. verify        - runs the acceptance suite on the PR head and reports the
+#                      build to Ketryx pinned to the PR head SHA. Reporting a
+#                      build is also what makes Ketryx scan a PAT-connected
+#                      repository, so the branch's git-based items exist before
+#                      the gate below reads them.
+#   2. traceability  - creates a HIDDEN Ketryx version pinned to the PR head SHA
+#                      (idempotent per PR+SHA, cleaned up when the PR closes),
+#                      then fails the PR if anything this diff touches is not
+#                      traced: a spec with no `itemFulfills`, a scenario with no
+#                      `@tests:`, or source changed with nothing traced at all.
+#
+# Why this repo does NOT gate on `GET /versions/{id}/status` the way the
+# reference repo does: that endpoint is GREEN only when the project's whole
+# default traceability matrix is green. This project is deliberately mid-build
+# (open coverage gaps, unexecuted test cases in the draft), so that endpoint
+# would be RED for every pull request and could never distinguish a traced
+# change from an untraced one. Its value is still reported here as an
+# annotation. The gate itself is scoped to what the pull request changed.
+#
+# The existing "Verification and Ketryx reporting" workflow (ketryx.yml) is
+# untouched - it still owns push/dispatch reporting to version 1.0.0.
+#
+# Repo config used: variable KETRYX_PROJECT, secret KETRYX_API_KEY.
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened, closed]
+
+concurrency:
+  group: ketryx-pr-checks-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+env:
+  KETRYX_URL: https://demo.ketryx.com
+
+jobs:
+  verify:
+    name: Acceptance suite -> Ketryx
+    if: github.event.action != 'closed'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Install dependencies
+        run: npm install
+
+      - name: Run acceptance suite
+        run: npm test
+        continue-on-error: true
+
+      - name: Strip trace tags from report
+        # Same reason as ketryx.yml: @tests tags belong in the .feature SOURCE.
+        # Left in the RUNTIME report the Build API also creates a bare AT linked
+        # straight to the requirement and the matrix shows every scenario twice.
+        run: |
+          node -e "
+            const fs = require('fs');
+            const p = 'reports/cucumber.json';
+            if (!fs.existsSync(p)) process.exit(0);
+            const r = JSON.parse(fs.readFileSync(p, 'utf8'));
+            for (const feat of r) {
+              for (const el of feat.elements || []) {
+                el.tags = (el.tags || []).filter(t => !t.name.startsWith('@tests:'));
+              }
+            }
+            fs.writeFileSync(p, JSON.stringify(r));
+          "
+
+      - name: Report build to Ketryx (pinned to PR head)
+        uses: Ketryx/ketryx-github-action@v1
+        if: success() || failure()
+        with:
+          # Demo instance, not app.ketryx.com (the action's default).
+          ketryx-url: https://demo.ketryx.com
+          project: ${{ vars.KETRYX_PROJECT }}
+          api-key: ${{ secrets.KETRYX_API_KEY }}
+          # No `version` on purpose - associate by commit so nothing lands on
+          # the released 1.0.0 version from a pull request.
+          commit-sha: ${{ github.event.pull_request.head.sha }}
+          build-name: pr-${{ github.event.pull_request.number }}-verification
+          test-cucumber-path: reports/cucumber.json
+
+  traceability:
+    name: Ketryx traceability gate
+    needs: [verify]
+    if: github.event.action != 'closed'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Collect changed files
+        id: diff
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: |
+          git fetch --no-tags origin "$BASE_SHA" "$HEAD_SHA" 2>/dev/null || true
+          {
+            echo 'files<<KXEOF'
+            git diff --name-only --diff-filter=ACMR "$BASE_SHA" "$HEAD_SHA"
+            echo 'KXEOF'
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Create or look up hidden Ketryx version pinned to PR head
+        id: upsert
+        env:
+          REPO_URL: https://github.com/${{ github.repository }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          PR_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: |
+          response=$(curl -sS -X POST \
+            "${KETRYX_URL}/api/v1/projects/${{ vars.KETRYX_PROJECT }}/versions?idempotentKey=pr-${PR_NUMBER}-${PR_HEAD_SHA}" \
+            -H "Authorization: Bearer ${{ secrets.KETRYX_API_KEY }}" \
+            -H "Content-Type: application/json" \
+            -d "$(jq -n \
+              --arg name "PR-${PR_NUMBER}-${PR_HEAD_SHA}" \
+              --arg url "${REPO_URL}" \
+              --arg sha "${PR_HEAD_SHA}" \
+              '{name: $name, visibility: "HIDDEN", repositorySettings: [{url: $url, releaseRefPattern: $sha}]}')")
+          id=$(echo "$response" | jq -r '.id // empty')
+          if [ -z "$id" ]; then
+            echo "::warning::Could not create a hidden Ketryx version for this PR: $response"
+          fi
+          echo "version_id=$id" >> "$GITHUB_OUTPUT"
+
+      - name: Run traceability gate
+        env:
+          KETRYX_PROJECT: ${{ vars.KETRYX_PROJECT }}
+          KETRYX_API_KEY: ${{ secrets.KETRYX_API_KEY }}
+          KETRYX_VERSION_ID: ${{ steps.upsert.outputs.version_id }}
+          CHANGED_FILES: ${{ steps.diff.outputs.files }}
+        run: node .github/scripts/trace-check.mjs
+
+      - name: Report project traceability status (informational)
+        if: always() && steps.upsert.outputs.version_id != ''
+        run: |
+          raw=$(curl -sS \
+            "${KETRYX_URL}/api/v1/projects/${{ vars.KETRYX_PROJECT }}/versions/${{ steps.upsert.outputs.version_id }}/status" \
+            -H "Authorization: Bearer ${{ secrets.KETRYX_API_KEY }}")
+          status=$(echo "$raw" | jq -r '.status // "UNAVAILABLE"')
+          url=$(echo "$raw" | jq -r '.traceabilityMatrixUrl // ""')
+          echo "::notice::Whole-project traceability status at this commit: ${status}. ${url}"
+
+  cleanup-hidden-version:
+    name: Clean up PR-pinned Ketryx version
+    if: github.event.action == 'closed'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Look up hidden version by idempotent key and delete it
+        env:
+          REPO_URL: https://github.com/${{ github.repository }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          PR_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: |
+          # POSTing with the same idempotentKey returns the existing version's
+          # id rather than creating a new one - that recovers the id at close.
+          response=$(curl -sS -X POST \
+            "${KETRYX_URL}/api/v1/projects/${{ vars.KETRYX_PROJECT }}/versions?idempotentKey=pr-${PR_NUMBER}-${PR_HEAD_SHA}" \
+            -H "Authorization: Bearer ${{ secrets.KETRYX_API_KEY }}" \
+            -H "Content-Type: application/json" \
+            -d "$(jq -n \
+              --arg name "PR-${PR_NUMBER}-${PR_HEAD_SHA}" \
+              --arg url "${REPO_URL}" \
+              --arg sha "${PR_HEAD_SHA}" \
+              '{name: $name, visibility: "HIDDEN", repositorySettings: [{url: $url, releaseRefPattern: $sha}]}')")
+          version_id=$(echo "$response" | jq -r '.id // empty')
+          if [ -z "$version_id" ]; then
+            echo "::warning::No Ketryx version id resolved for PR #${PR_NUMBER}; nothing to delete."
+            exit 0
+          fi
+          code=$(curl -sS -o /tmp/del -w "%{http_code}" -X DELETE \
+            "${KETRYX_URL}/api/v1/projects/${{ vars.KETRYX_PROJECT }}/versions/${version_id}" \
+            -H "Authorization: Bearer ${{ secrets.KETRYX_API_KEY }}")
+          if [ "$code" -ge 200 ] && [ "$code" -lt 300 ]; then
+            echo "Deleted Ketryx version ${version_id}."
+          else
+            echo "::warning::Failed to delete Ketryx version ${version_id} (HTTP ${code}):"
+            cat /tmp/del || true
+          fi
