@@ -194,3 +194,35 @@ Then('every third-party component is listed with a package URL and version', fun
     assert.ok(c.version, 'component missing version');
   }
 });
+
+// --- Implant firmware compatibility screening ---------------------------
+
+Given('an implant reporting firmware version {string}', function (version) {
+  this.programmer = new Programmer();
+  this.programmer.authenticate({ role: 'Programmer' });
+  this.programmer.confirmPatientMatch();
+  this.programmer.identifyImplant({ firmwareVersion: version });
+});
+
+When('a compatibility list adding firmware version {string} is loaded', function (version) {
+  const current = this.programmer.compatibilityList;
+  this.result = this.programmer.loadCompatibilityList({
+    listVersion: '2026.09',
+    supportedFirmwareVersions: current.supportedFirmwareVersions.concat([version]),
+  });
+});
+
+Then('no programming session is opened', function () {
+  assert.strictEqual(this.result.opened, false);
+  assert.strictEqual(this.programmer.sessionOpen, false);
+});
+
+Then('the clinician is told the implant firmware is unsupported', function () {
+  assert.strictEqual(this.result.reason, 'FIRMWARE_UNSUPPORTED');
+  assert.strictEqual(this.result.firmwareVersion, '2.9.4');
+});
+
+Then('the programming session is opened', function () {
+  assert.strictEqual(this.result.opened, true);
+  assert.strictEqual(this.programmer.sessionOpen, true);
+});
