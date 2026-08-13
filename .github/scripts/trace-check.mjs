@@ -5,8 +5,9 @@
 //
 //   Stage 1 (static, no network): every file this PR touches inside the traced
 //   scope must carry the Ketryx metadata that builds the trace chain -
-//   specs/*.md need `itemFulfills`, feature scenarios need `@id:` and `@tests:`,
-//   and a change to src/** must be accompanied by a traced spec or scenario.
+//   specs/*.md need `itemFulfills`, function-level items in src/** need
+//   `@itemFulfills:`, feature scenarios need `@id:` and `@tests:`, and a change
+//   to src/** must be accompanied by something traced.
 //
 //   Stage 2 (Ketryx-verified): ask Ketryx what it actually sees at the PR head
 //   commit and confirm each touched software item spec really did land as a
@@ -104,7 +105,32 @@ for (const f of allFeatures) {
 
 const changedSpecs = changed.filter((f) => f.startsWith('specs/') && f.endsWith('.md') && fs.existsSync(f));
 const changedFeatures = changed.filter((f) => f.startsWith('features/') && f.endsWith('.feature') && fs.existsSync(f));
-const changedSrc = changed.filter((f) => f.startsWith('src/') && f.endsWith('.js') && fs.existsSync(f));
+const SRC_EXT = /\.(js|mjs|cjs|ts|tsx)$/;
+const changedSrc = changed.filter((f) => f.startsWith('src/') && SRC_EXT.test(f) && fs.existsSync(f));
+
+// Function-level git items: a JSDoc block carrying `@itemId:` above a function.
+// Same trace edges as a spec file, expressed inline.
+function parseFunctionItems(file) {
+  const text = fs.readFileSync(file, 'utf8');
+  const items = [];
+  const blocks = text.matchAll(/\/\*\*([\s\S]*?)\*\//g);
+  for (const b of blocks) {
+    const body = b[1];
+    const idMatch = /@itemId:\s*(\S+)/.exec(body);
+    if (!idMatch) continue;
+    const titleMatch = /@itemTitle:\s*"([^"]*)"/.exec(body);
+    const typeMatch = /@itemType:\s*(.+)/.exec(body);
+    const fulfillsMatch = /@itemFulfills:\s*(.+)/.exec(body);
+    items.push({
+      itemId: idMatch[1],
+      title: titleMatch ? titleMatch[1].trim() : null,
+      itemType: typeMatch ? typeMatch[1].trim() : null,
+      fulfills: (fulfillsMatch ? fulfillsMatch[1] : '').split(',').map((x) => x.trim()).filter(Boolean),
+      line: text.slice(0, b.index).split('\n').length,
+    });
+  }
+  return items;
+}
 
 console.log('--- Ketryx PR traceability gate ---');
 console.log(`Changed files in traced scope: ${changedSpecs.length} spec(s), ${changedFeatures.length} feature(s), ${changedSrc.length} source file(s)`);
@@ -143,9 +169,24 @@ for (const f of changedFeatures) {
   }
 }
 
-if (changedSrc.length && changedSpecs.length === 0 && changedFeatures.length === 0) {
+let srcItemCount = 0;
+for (const f of changedSrc) {
+  for (const it of parseFunctionItems(f)) {
+    srcItemCount++;
+    if (!it.itemType) fail(`${f}:${it.line} function-level item \`${it.itemId}\` has no \`@itemType:\`.`);
+    if (it.fulfills.length === 0) {
+      fail(`${f}:${it.line} function-level item \`${it.itemId}\` declares no \`@itemFulfills:\` - this design output traces to no requirement and lands in Ketryx as an orphan.`);
+    } else {
+      const bad = it.fulfills.filter((k) => !REQ_KEY.test(k));
+      if (bad.length) fail(`${f}:${it.line} \`@itemFulfills:\` on \`${it.itemId}\` contains value(s) that are not requirement keys: ${bad.join(', ')}`);
+      else note(`  OK  ${f}:${it.line} ${it.itemId} fulfills ${it.fulfills.join(', ')}`);
+    }
+  }
+}
+
+if (changedSrc.length && changedSpecs.length === 0 && changedFeatures.length === 0 && srcItemCount === 0) {
   fail(
-    `This pull request changes source under src/ (${changedSrc.join(', ')}) but touches no software item spec in specs/ and no scenario in features/. ` +
+    `This pull request changes source under src/ (${changedSrc.join(', ')}) but declares no Ketryx item: no software item spec in specs/, no scenario in features/, and no function-level \`@itemId:\` block in the changed source. ` +
       `Changed behavior has to trace to a requirement and be verified by a test.`
   );
 }
