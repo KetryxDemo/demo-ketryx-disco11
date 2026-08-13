@@ -1,0 +1,122 @@
+name: Ketryx change-impact review
+
+# Modelled on KetryxDemo/ketryx-vitals-poc/.github/workflows/claude-risk-review.yml.
+#
+# On every pull request Claude Code assesses the change's blast radius - which
+# regulated code and which Ketryx-controlled items the diff touches - and posts
+# a HIGH-RISK / LOW-RISK verdict as a PR comment. High-risk changes need a
+# Change Request approval in Ketryx before merge/release; low-risk changes
+# proceed with lightweight sign-off.
+#
+# Required repo config:
+#   - variable  KETRYX_PROJECT     the Ketryx project for this repo (KXPRJ...)
+#   - secret    KETRYX_API_KEY     Ketryx API key (read scopes, for the MCP)
+#   - secret    ANTHROPIC_API_KEY  for the Claude Code action  <-- MUST BE ADDED
+#
+# Until ANTHROPIC_API_KEY exists on this repository the job short-circuits with
+# a notice instead of failing, so it never blocks a pull request.
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened]
+
+concurrency:
+  group: ketryx-change-impact-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+jobs:
+  classify:
+    name: Change-impact classification
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pull-requests: write
+      issues: write
+      id-token: write
+    steps:
+      - name: Check for ANTHROPIC_API_KEY
+        id: preflight
+        env:
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+        run: |
+          if [ -z "$ANTHROPIC_API_KEY" ]; then
+            echo "::notice::ANTHROPIC_API_KEY is not set on this repository - skipping the change-impact review. Add the secret to enable it."
+            echo "enabled=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "enabled=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Checkout
+        if: steps.preflight.outputs.enabled == 'true'
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Claude change-impact classification
+        if: steps.preflight.outputs.enabled == 'true'
+        uses: anthropics/claude-code-action@v1
+        env:
+          # Bearer token for the Ketryx MCP server, expanded into
+          # .github/mcp-config.json at runtime by Claude Code.
+          KETRYX_API_KEY: ${{ secrets.KETRYX_API_KEY }}
+          GH_TOKEN: ${{ github.token }}
+        with:
+          anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
+          prompt: |
+            You are performing a risk-based change-impact assessment of pull
+            request #${{ github.event.pull_request.number }} in the
+            ${{ github.repository }} repository.
+
+            This repository is the NeuroCue SCS clinician programmer. The
+            REGULATED scope is:
+              - src/programmer.js   session, telemetry, stimulation, audit logic
+              - specs/**.md         software item specs (design outputs)
+              - features/**.feature Cucumber verification scenarios
+            Everything else (src/bom.js tooling, README, CI config) is
+            NON-regulated supporting material.
+
+            The Ketryx project for this repo is `${{ vars.KETRYX_PROJECT }}` on
+            https://demo.ketryx.com. You have a Ketryx MCP server available
+            (tools prefixed `mcp__ketryx__`) - use it to trace the blast radius.
+            Requirements in this project carry Jira keys `NC-*`.
+
+            Steps:
+            1. Read the PR diff: `gh pr diff ${{ github.event.pull_request.number }}`.
+            2. Determine which files fall inside the regulated scope above.
+            3. For regulated files, trace the blast radius in Ketryx: use
+               mcp__ketryx__hybrid_search_items, mcp__ketryx__get_item_records
+               and mcp__ketryx__resolve_references, scoped to project
+               ${{ vars.KETRYX_PROJECT }}, to find the controlled items -
+               requirements, software item specs, risks, test cases - that the
+               touched code implements or verifies. Read the `itemFulfills`
+               frontmatter of any touched spec and the `@tests:` tags of any
+               touched scenario; those are the trace edges.
+            4. Classify the change:
+               - HIGH-RISK if it changes regulated behavior: stimulation
+                 amplitude limits or ceiling, confirmation flow, session
+                 authentication or timeout, telemetry abort handling, session
+                 cryptography, audit-log content, or implant compatibility
+                 checks - or touches any controlled item's traced code.
+               - LOW-RISK if it is outside the regulated scope, or inside it but
+                 demonstrably non-behavioral (comments, formatting, test-only
+                 additions, docs) with no controlled-item impact.
+               When uncertain, classify HIGH-RISK (fail safe).
+            5. Post ONE PR comment via
+               `gh pr comment ${{ github.event.pull_request.number }} --body "..."`
+               structured as:
+               - **Verdict: HIGH-RISK CHANGE** or **Verdict: LOW-RISK CHANGE**
+               - **Why** - 2-4 bullet rationale (files in/out of regulated
+                 scope, behavior changed, blast radius)
+               - **Traced impact** - the controlled Ketryx items affected, by
+                 key and title (or "none traced yet")
+               - **Required next step** - HIGH-RISK: "This change requires a
+                 Change Request approval in Ketryx before merge/release." /
+                 LOW-RISK: "Proceeds with standard review; no Change Request
+                 required."
+
+            Only assess what changed in this PR. Do not modify any files.
+          claude_args: |
+            --mcp-config .github/mcp-config.json
+            --model sonnet
+            --max-turns 25
+            --allowedTools "mcp__ketryx__*,Bash(gh pr diff:*),Bash(gh pr view:*),Bash(gh pr comment:*),Read,Grep,Glob"
