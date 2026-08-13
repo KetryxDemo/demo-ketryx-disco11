@@ -28,6 +28,8 @@ jobs:
   classify:
     name: Change-impact classification
     runs-on: ubuntu-latest
+    # Advisory only: the verdict is posted as a PR comment, it never blocks the PR.
+    continue-on-error: true
     permissions:
       contents: read
       pull-requests: write
@@ -118,5 +120,5 @@ jobs:
           claude_args: |
             --mcp-config .github/mcp-config.json
             --model sonnet
-            --max-turns 25
+            --max-turns 60
             --allowedTools "mcp__ketryx__*,Bash(gh pr diff:*),Bash(gh pr view:*),Bash(gh pr comment:*),Read,Grep,Glob"
