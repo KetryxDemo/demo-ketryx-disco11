@@ -3,6 +3,8 @@
 // Minimal model of the clinician programmer, sufficient to exercise the
 // behaviors described in specs/. Not device software.
 
+const { AuthLockoutPolicy } = require('./auth-lockout');
+
 const STEP_LIMIT_MA = 0.5;
 const IDLE_TIMEOUT_MINUTES = 15;
 const ABORT_BUDGET_MS = 2000;
@@ -21,6 +23,8 @@ class Programmer {
     this.ceilingMa = 4.0;
     this.clinician = null;
     this.auditLog = [];
+    this.elapsedMinutes = 0;
+    this.lockoutPolicy = new AuthLockoutPolicy();
   }
 
   static inOpenSession({ amplitudeMa = 2.0, ceilingMa = 4.0, clinician = 'dr-lin' } = {}) {
@@ -35,9 +39,53 @@ class Programmer {
   }
 
   authenticate({ role, id = 'dr-lin' }) {
-    this.authenticated = role === 'Programmer';
-    this.clinician = this.authenticated ? id : null;
-    return this.authenticated;
+    if (this.lockoutPolicy.isLocked(id, this.elapsedMinutes)) {
+      this.authenticated = false;
+      this.clinician = null;
+      const lockedForMinutes = this.lockoutPolicy.remainingLockoutMinutes(id, this.elapsedMinutes);
+      this.appendAuthAudit('authentication.blocked', id, { lockedForMinutes });
+      return { authenticated: false, reason: 'ACCOUNT_LOCKED', lockedForMinutes };
+    }
+
+    const accepted = role === 'Programmer';
+    this.authenticated = accepted;
+    this.clinician = accepted ? id : null;
+
+    if (accepted) {
+      this.lockoutPolicy.recordSuccess(id);
+      this.appendAuthAudit('authentication.succeeded', id, {});
+      return { authenticated: true };
+    }
+
+    const outcome = this.lockoutPolicy.recordFailure(id, this.elapsedMinutes);
+    this.appendAuthAudit('authentication.failed', id, {
+      failures: outcome.failures,
+      locked: outcome.locked,
+    });
+    if (outcome.locked) {
+      this.appendAuthAudit('authentication.locked', id, {
+        lockedForMinutes: this.lockoutPolicy.lockoutMinutes,
+      });
+      return {
+        authenticated: false,
+        reason: 'ACCOUNT_LOCKED',
+        lockedForMinutes: this.lockoutPolicy.lockoutMinutes,
+      };
+    }
+    return {
+      authenticated: false,
+      reason: 'INVALID_CREDENTIALS',
+      attemptsRemaining: outcome.attemptsRemaining,
+    };
+  }
+
+  appendAuthAudit(event, clinicianId, detail) {
+    this.auditLog.push({
+      event,
+      clinician: clinicianId,
+      detail,
+      timestamp: new Date().toISOString(),
+    });
   }
 
   confirmPatientMatch() {
@@ -57,6 +105,7 @@ class Programmer {
   }
 
   advanceIdleMinutes(minutes) {
+    this.elapsedMinutes += minutes;
     if (minutes >= IDLE_TIMEOUT_MINUTES) {
       this.sessionOpen = false;
       this.telemetryOpen = false;
@@ -64,6 +113,13 @@ class Programmer {
       this.authenticated = false;
     }
     return { sessionOpen: this.sessionOpen };
+  }
+
+  advanceMinutes(minutes) {
+    // Advances the clock without implying clinician inactivity, so a locked
+    // account can serve out its cool-down while no session is open.
+    this.elapsedMinutes += minutes;
+    return { elapsedMinutes: this.elapsedMinutes };
   }
 
   propose({ amplitudeMa }) {
