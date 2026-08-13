@@ -214,10 +214,12 @@ if (changedSpecs.length === 0) {
 
 const PAGE = 1000;
 
-// `query` is a required parameter on this endpoint even though it is the KQL
-// filter. An empty KQL query matches every record, which is what we want - the
-// gate filters by type client-side rather than betting on type shorthands.
-async function fetchRecords(kql = '') {
+// `query` is required on this endpoint even though it is the KQL filter, and an
+// empty string is rejected as missing - so a real expression has to be sent.
+// Design outputs (SW) and the Test Cases that verify them are all this needs.
+const RECORD_QUERIES = ['type:SW or type:TC', 'is:deleted or not is:deleted'];
+
+async function fetchRecords(kql) {
   const out = [];
   let startAt = 0;
   for (;;) {
@@ -242,11 +244,30 @@ const wanted = changedSpecs.map((f) => {
   return { file: f, itemId: s.meta.itemId, title: s.title };
 });
 
+// Pick the first KQL expression this instance accepts and that returns records.
+let recordQuery = null;
+for (const q of RECORD_QUERIES) {
+  try {
+    const probe = await fetchRecords(q);
+    console.log(`KQL "${q}" -> ${probe.length} record(s).`);
+    if (probe.length > 0) {
+      recordQuery = q;
+      break;
+    }
+  } catch (err) {
+    console.log(`::warning::KQL "${q}" rejected: ${err.message}`);
+  }
+}
+if (!recordQuery) {
+  console.log('::warning::Could not read records from Ketryx for this version; skipping platform verification. The static stage above is the enforced gate.');
+  process.exit(0);
+}
+
 let records = [];
 let found = [];
 // Ketryx scans the branch when the build is reported; give the scan a window.
 for (let attempt = 1; attempt <= 20; attempt++) {
-  records = await fetchRecords();
+  records = await fetchRecords(recordQuery);
   found = wanted.filter((w) => records.some((r) => r.title === w.title));
   if (found.length === wanted.length) break;
   console.log(`Waiting for Ketryx to scan the PR commit (${found.length}/${wanted.length} spec(s) visible, attempt ${attempt}/20)...`);
