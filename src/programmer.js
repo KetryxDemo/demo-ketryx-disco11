@@ -7,6 +7,11 @@ const STEP_LIMIT_MA = 0.5;
 const IDLE_TIMEOUT_MINUTES = 15;
 const ABORT_BUDGET_MS = 2000;
 
+// Therapeutic impedance window for a stimulation lead. Outside it the charge
+// actually delivered no longer corresponds to the programmed amplitude.
+const IMPEDANCE_MIN_OHMS = 200;
+const IMPEDANCE_MAX_OHMS = 2000;
+
 class Programmer {
   constructor() {
     this.authenticated = false;
@@ -21,6 +26,26 @@ class Programmer {
     this.ceilingMa = 4.0;
     this.clinician = null;
     this.auditLog = [];
+    this.leadImpedanceOhms = 800;
+  }
+
+  reportLeadImpedance(ohms) {
+    this.leadImpedanceOhms = ohms;
+    return { measuredOhms: ohms };
+  }
+
+  screenLeadImpedance() {
+    const ohms = this.leadImpedanceOhms;
+    if (!Number.isFinite(ohms)) {
+      return { withinWindow: false, reason: 'IMPEDANCE_UNAVAILABLE' };
+    }
+    if (ohms < IMPEDANCE_MIN_OHMS) {
+      return { withinWindow: false, reason: 'IMPEDANCE_BELOW_WINDOW', measuredOhms: ohms };
+    }
+    if (ohms > IMPEDANCE_MAX_OHMS) {
+      return { withinWindow: false, reason: 'IMPEDANCE_ABOVE_WINDOW', measuredOhms: ohms };
+    }
+    return { withinWindow: true, measuredOhms: ohms };
   }
 
   static inOpenSession({ amplitudeMa = 2.0, ceilingMa = 4.0, clinician = 'dr-lin' } = {}) {
@@ -77,6 +102,12 @@ class Programmer {
   }
 
   requestAmplitude(mA) {
+    // A lead outside the therapeutic impedance window cannot deliver the
+    // programmed charge, so no adjustment is accepted against it.
+    const impedance = this.screenLeadImpedance();
+    if (!impedance.withinWindow) {
+      return { accepted: false, reason: impedance.reason };
+    }
     // The implant ceiling applies regardless of step size, so it is checked first.
     if (mA > this.ceilingMa) {
       return { accepted: false, reason: 'CEILING_EXCEEDED' };
