@@ -7,6 +7,14 @@ const STEP_LIMIT_MA = 0.5;
 const IDLE_TIMEOUT_MINUTES = 15;
 const ABORT_BUDGET_MS = 2000;
 
+// Versioned compatibility list, kept as replaceable data rather than a constant
+// compiled into the programmer, so the supported set can be revised without
+// reinstalling the application.
+const FIRMWARE_COMPATIBILITY_LIST = {
+  listVersion: '2026.03',
+  supportedFirmwareVersions: ['3.2.0', '3.2.1', '3.3.0'],
+};
+
 class Programmer {
   constructor() {
     this.authenticated = false;
@@ -21,6 +29,30 @@ class Programmer {
     this.ceilingMa = 4.0;
     this.clinician = null;
     this.auditLog = [];
+    this.compatibilityList = FIRMWARE_COMPATIBILITY_LIST;
+    this.implantFirmwareVersion = '3.2.1';
+  }
+
+  identifyImplant({ firmwareVersion }) {
+    this.implantFirmwareVersion = firmwareVersion;
+    return this.screenFirmwareCompatibility();
+  }
+
+  loadCompatibilityList(list) {
+    // Replacing the list is a data update, not a reinstall of the programmer.
+    this.compatibilityList = list;
+    return { listVersion: list.listVersion };
+  }
+
+  screenFirmwareCompatibility() {
+    const reported = this.implantFirmwareVersion;
+    if (typeof reported !== 'string' || reported.trim() === '') {
+      return { supported: false, reason: 'FIRMWARE_VERSION_UNREPORTED' };
+    }
+    if (!this.compatibilityList.supportedFirmwareVersions.includes(reported)) {
+      return { supported: false, reason: 'FIRMWARE_UNSUPPORTED', firmwareVersion: reported };
+    }
+    return { supported: true, firmwareVersion: reported };
   }
 
   static inOpenSession({ amplitudeMa = 2.0, ceilingMa = 4.0, clinician = 'dr-lin' } = {}) {
@@ -45,6 +77,18 @@ class Programmer {
   }
 
   openSession() {
+    // Screened before authentication so an unprogrammable implant is rejected
+    // without exposing session credentials to it.
+    const compatibility = this.screenFirmwareCompatibility();
+    if (!compatibility.supported) {
+      this.sessionOpen = false;
+      this.telemetryOpen = false;
+      return {
+        opened: false,
+        reason: compatibility.reason,
+        firmwareVersion: compatibility.firmwareVersion,
+      };
+    }
     if (!this.authenticated) {
       return { opened: false, reason: 'NOT_AUTHENTICATED' };
     }
@@ -131,4 +175,9 @@ class Programmer {
   }
 }
 
-module.exports = { Programmer, STEP_LIMIT_MA, IDLE_TIMEOUT_MINUTES };
+module.exports = {
+  Programmer,
+  STEP_LIMIT_MA,
+  IDLE_TIMEOUT_MINUTES,
+  FIRMWARE_COMPATIBILITY_LIST,
+};
